@@ -29,7 +29,7 @@ class CTC(torch.nn.Module):
         # In case of Pytorch >= 1.7.0, CTC will be always builtin
         self.ctc_type = (
             ctc_type
-            if LooseVersion(torch.__version__) < LooseVersion("1.7.0")
+            if LooseVersion(torch.__version__) < LooseVersion("1.7.0") or ctc_type == "k2"
             else "builtin"
         )
         if ctc_type != self.ctc_type:
@@ -39,8 +39,11 @@ class CTC(torch.nn.Module):
             self.ctc_loss = torch.nn.CTCLoss(reduction=reduction_type)
         elif self.ctc_type == "warpctc":
             import warpctc_pytorch as warp_ctc
-
             self.ctc_loss = warp_ctc.CTCLoss(size_average=True, reduce=reduce)
+        elif self.ctc_type == "k2":
+            reduction_type = "sum" if reduce else "none"
+            from espnet.nets.pytorch_backend.ctc_graph import K2CTCLoss
+            self.ctc_loss = K2CTCLoss(odim, reduction=reduction_type)
         else:
             raise ValueError(
                 'ctc_type must be "builtin" or "warpctc": {}'.format(self.ctc_type)
@@ -61,6 +64,12 @@ class CTC(torch.nn.Module):
             return loss
         elif self.ctc_type == "warpctc":
             return self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+        elif self.ctc_type == "k2":
+            th_pred = th_pred.log_softmax(2)
+            loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
+            # Batch-size average
+            loss = loss / th_pred.size(1)
+            return loss
         else:
             raise NotImplementedError
 
