@@ -52,9 +52,9 @@ class K2CTCLoss(torch.nn.Module):
     log_probs = log_probs.permute(1,0,2) # now log_probs is [N, T, C]  batchSize x seqLength x alphabet_size
     decoding_graph = self.graph_compiler.compile(targets, target_lengths).to(log_probs.device)
     supervision_segments = torch.stack(
-        (torch.tensor(range(target_lengths.shape[0])),
-         torch.zeros(target_lengths.shape[0]),
-         target_lengths), 1).to(torch.int32)
+        (torch.tensor(range(input_lengths.shape[0])),
+         torch.zeros(input_lengths.shape[0]),
+         input_lengths), 1).to(torch.int32)
     indices = torch.argsort(supervision_segments[:, 2], descending=True)
     supervision_segments = supervision_segments[indices]
     dense_fsa_vec = k2.DenseFsaVec(log_probs, supervision_segments)
@@ -111,8 +111,8 @@ class NaiveCtcTrainingGraphCompiler(object):
 
         self.dim = odim
         self.oov = oov
-        ctc_topo = build_ctc_topo(list(range(self.dim)))
-        self.ctc_topo = k2.arc_sort(ctc_topo)
+        # ctc_topo = build_ctc_topo(list(range(self.dim)))
+        # self.ctc_topo = k2.arc_sort(ctc_topo)
         self.G = G
 
     def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor) -> k2.Fsa:
@@ -128,6 +128,7 @@ class NaiveCtcTrainingGraphCompiler(object):
     @lru_cache(maxsize=100000)
     def compile_one_and_cache(self, text: torch.Tensor) -> k2.Fsa:
         word_ids = text.tolist()
+        '''
         fsa = k2.linear_fsa(word_ids)
         fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
         if self.G != None:
@@ -137,6 +138,8 @@ class NaiveCtcTrainingGraphCompiler(object):
         decoding_graph = k2.arc_sort(decoding_graph)
         decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
         decoding_graph = k2.connect(decoding_graph)
+        '''
+        decoding_graph = build_composed_ctc_topo(word_ids)
         return decoding_graph
 
 class CtcTrainingGraphCompiler(object):
@@ -188,3 +191,37 @@ class CtcTrainingGraphCompiler(object):
         decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
         decoding_graph = k2.connect(decoding_graph)
         return decoding_graph
+
+def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
+    '''Build composed ctc topology.
+
+    The resulting topology converts repeated input
+    symbols to a single output symbol.
+
+    Args:
+      tokens:
+        A list of tokens, e.g., phones, characters, etc.
+    Returns:
+      Returns an FSA that 
+    '''
+
+    num_tokens = len(tokens) 
+    final_state = num_tokens * 2 + 1
+    rules = ''
+    rules += f'0 0 0 0 0.0\n'
+    rules += f'0 1 {tokens[0]} {tokens[0]} 0.0\n'
+    rules += f'1 1 {tokens[0]} 0 0.0\n'
+    for i in range(0, num_tokens - 1):
+      rules += f'{2*i+1} {2*i+2} 0 0 0.0\n'
+      rules += f'{2*i+1} {2*i+3} {tokens[i+1]} {tokens[i+1]} 0.0\n'
+      rules += f'{2*i+2} {2*i+2} 0 0 0.0\n'
+      rules += f'{2*i+2} {2*i+3} {tokens[i+1]} {tokens[i+1]} 0.0\n'
+      rules += f'{2*i+3} {2*i+3} {tokens[i+1]} 0 0.0\n'
+    rules += f'{2*num_tokens-1} {2*num_tokens} 0 0 0.0\n'
+    rules += f'{2*num_tokens-1} {2*num_tokens+1} -1 -1 0.0\n'
+    rules += f'{2*num_tokens} {2*num_tokens} 0 0 0.0\n'
+    rules += f'{2*num_tokens} {2*num_tokens+1} -1 -1 0.0\n'
+    rules += f'{final_state}'
+    ans = k2.Fsa.from_str(rules)
+    return ans
+    
