@@ -129,6 +129,7 @@ class NaiveCtcTrainingGraphCompiler(object):
     def compile_one_and_cache(self, text: torch.Tensor) -> k2.Fsa:
         word_ids = text.tolist()
         fsa = k2.linear_fsa(word_ids)
+        fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
         if self.G != None:
           decoding_graph = k2.connect(k2.intersect(fsa, self.G))
         else:
@@ -182,8 +183,6 @@ class CtcTrainingGraphCompiler(object):
                   for token in text.split(' '))
         word_ids = [self.words[token] for token in tokens]
         fsa = k2.linear_fsa(word_ids)
-        fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
-        fsa.aux_labels = word_ids + [-1]
         decoding_graph = k2.connect(k2.intersect(fsa, self.L_inv)).invert_()
         decoding_graph = k2.arc_sort(decoding_graph)
         decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
