@@ -98,8 +98,7 @@ class NaiveCtcTrainingGraphCompiler(object):
 
     def __init__(self,
                  odim: int,
-                 oov: str = '<unk>',
-                 G: k2.Fsa = None):
+                 oov: str = '<unk>'):
         '''
         Args:
 
@@ -111,9 +110,10 @@ class NaiveCtcTrainingGraphCompiler(object):
 
         self.dim = odim
         self.oov = oov
-        # ctc_topo = build_ctc_topo(list(range(self.dim)))
-        # self.ctc_topo = k2.arc_sort(ctc_topo)
-        self.G = G
+        '''
+        ctc_topo = build_ctc_topo(list(range(self.dim)))
+        self.ctc_topo = k2.arc_sort(ctc_topo)
+        '''
 
     def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor) -> k2.Fsa:
         texts_lengths = torch.cat([torch.tensor([0]), texts_lengths])
@@ -131,14 +131,13 @@ class NaiveCtcTrainingGraphCompiler(object):
         '''
         fsa = k2.linear_fsa(word_ids)
         fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
-        if self.G != None:
-          decoding_graph = k2.connect(k2.intersect(fsa, self.G))
-        else:
-          decoding_graph = fsa
+        decoding_graph = fsa
         decoding_graph = k2.arc_sort(decoding_graph)
         decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
         decoding_graph = k2.connect(decoding_graph)
         '''
+        # Fsa composition spends too much time when odim is large. 
+        # Therefore, we used predefined function to get training graph
         decoding_graph = build_composed_ctc_topo(word_ids)
         return decoding_graph
 
@@ -195,14 +194,11 @@ class CtcTrainingGraphCompiler(object):
 def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
     '''Build composed ctc topology.
 
-    The resulting topology converts repeated input
-    symbols to a single output symbol.
-
     Args:
       tokens:
-        A list of tokens, e.g., phones, characters, etc.
+        A list of tokens, e.g., phones, characters, bpe, etc.
     Returns:
-      Returns an FSA that 
+      Returns an composed fsa
     '''
 
     num_tokens = len(tokens) 
