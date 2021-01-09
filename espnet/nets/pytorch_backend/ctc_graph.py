@@ -11,38 +11,6 @@ import k2
 import math
 from typing import Tuple
 
-def get_tot_objf_and_num_frames(tot_scores: torch.Tensor,
-                                frames_per_seq: torch.Tensor
-                                ) -> Tuple[float, int, int]:
-    ''' Figures out the total score(log-prob) over all successful supervision segments
-    (i.e. those for which the total score wasn't -infinity), and the corresponding
-    number of frames of neural net output
-         Args:
-            tot_scores: a Torch tensor of shape (num_segments,) containing total scores
-                       from forward-backward
-        frames_per_seq: a Torch tensor of shape (num_segments,) containing the number of
-                       frames for each segment
-        Returns:
-             Returns a tuple of 3 scalar tensors:  (tot_score, ok_frames, all_frames)
-        where ok_frames is the frames for successful (finite) segments, and
-       all_frames is the frames for all segments (finite or not).
-    '''
-    mask = torch.ne(tot_scores, -math.inf)
-    # finite_indexes is a tensor containing successful segment indexes, e.g.
-    # [ 0 1 3 4 5 ]
-    finite_indexes = torch.nonzero(mask).squeeze(1)
-    if False:
-        bad_indexes = torch.nonzero(~mask).squeeze(1)
-        if bad_indexes.shape[0] > 0:
-            print("Bad indexes: ", bad_indexes, ", bad lengths: ",
-                  frames_per_seq[bad_indexes], " vs. max length ",
-                  torch.max(frames_per_seq), ", avg ",
-                  (torch.sum(frames_per_seq) / frames_per_seq.numel()))
-    # print("finite_indexes = ", finite_indexes, ", tot_scores = ", tot_scores)
-    ok_frames = frames_per_seq[finite_indexes].sum()
-    all_frames = frames_per_seq.sum()
-    return (tot_scores[finite_indexes].sum(), ok_frames, all_frames)
-
 class K2CTCLoss(torch.nn.Module):
   def __init__(self, odim: int, reduction: str = 'sum') -> None:
     torch.nn.Module.__init__(self)
@@ -77,24 +45,31 @@ def build_ctc_topo(tokens: List[int]) -> k2.Fsa:
     The resulting topology converts repeated input
     symbols to a single output symbol.
 
+    Caution:
+      The resulting topo is an FST. Epsilons are on the left
+      side (i.e., ilabels) and tokens are on the right side (i.e., olabels)
+
     Args:
       tokens:
         A list of tokens, e.g., phones, characters, etc.
     Returns:
-      Returns an FSA that converts repeated tokens to a single token.
+      Returns an FST that converts repeated tokens to a single token.
     '''
+    assert 0 in tokens, 'We assume 0 is ID of the blank symbol'
+
     num_states = len(tokens)
     final_state = num_states
     rules = ''
     for i in range(num_states):
         for j in range(num_states):
             if i == j:
-                rules += f'{i} {i} {tokens[i]} 0 0.0\n'
+                rules += f'{i} {i} 0 {tokens[i]} 0.0\n'
             else:
                 rules += f'{i} {j} {tokens[j]} {tokens[j]} 0.0\n'
         rules += f'{i} {final_state} -1 -1 0.0\n'
     rules += f'{final_state}'
     ans = k2.Fsa.from_str(rules)
+    ans = k2.arc_sort(ans)
     return ans
 
 
@@ -114,10 +89,8 @@ class NaiveCtcTrainingGraphCompiler(object):
 
         self.dim = odim
         self.oov = oov
-        '''
-        ctc_topo = build_ctc_topo(list(range(self.dim)))
-        self.ctc_topo = k2.arc_sort(ctc_topo)
-        '''
+        self.ctc_topo = build_ctc_topo(list(range(self.dim)))
+
 
     def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor) -> k2.Fsa:
         texts_lengths = torch.cat([torch.tensor([0]), texts_lengths])
@@ -133,47 +106,39 @@ class NaiveCtcTrainingGraphCompiler(object):
     @lru_cache(maxsize=100000)
     def compile_one_and_cache(self, text: torch.Tensor) -> k2.Fsa:
         word_ids = text.tolist()
-        '''
-        fsa = k2.linear_fsa(word_ids)
-        fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
-        fsa = k2.arc_sort(fsa)
-        decoding_graph = k2.compose(self.ctc_topo, fsa)
-        decoding_graph = k2.connect(decoding_graph)
-        '''
-        # Fsa composition spends too much time when odim is large. 
-        # Therefore, we used predefined function to get training graph
-        decoding_graph = build_composed_ctc_topo(word_ids)
+        linear_fsa = k2.linear_fsa(word_ids)
+        decoding_graph = k2.intersect(self.ctc_topo, linear_fsa)
+        decoding_graph = k2.connect(decoding_graph).invert_()
         return decoding_graph
 
-def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
-    '''Build composed ctc topology.
-
-    Args:
-      tokens:
-        A list of tokens, e.g., phones, characters, bpe, etc.
-    Returns:
-      Returns an composed fsa
+def get_tot_objf_and_num_frames(tot_scores: torch.Tensor,
+                                frames_per_seq: torch.Tensor
+                                ) -> Tuple[float, int, int]:
+    ''' Figures out the total score(log-prob) over all successful supervision segments
+    (i.e. those for which the total score wasn't -infinity), and the corresponding
+    number of frames of neural net output
+         Args:
+            tot_scores: a Torch tensor of shape (num_segments,) containing total scores
+                       from forward-backward
+        frames_per_seq: a Torch tensor of shape (num_segments,) containing the number of
+                       frames for each segment
+        Returns:
+             Returns a tuple of 3 scalar tensors:  (tot_score, ok_frames, all_frames)
+        where ok_frames is the frames for successful (finite) segments, and
+       all_frames is the frames for all segments (finite or not).
     '''
-
-    num_tokens = len(tokens) 
-    final_state = num_tokens * 2 + 1
-
-    rules = ''
-    rules += f'0 0 0 0 0.0\n'
-    rules += f'0 1 {tokens[0]} {tokens[0]} 0.0\n'
-    rules += f'1 1 {tokens[0]} 0 0.0\n'
-    for i in range(0, num_tokens - 1):
-      rules += f'{2*i+1} {2*i+2} 0 0 0.0\n'
-      rules += f'{2*i+1} {2*i+3} {tokens[i+1]} {tokens[i+1]} 0.0\n'
-      rules += f'{2*i+2} {2*i+2} 0 0 0.0\n'
-      rules += f'{2*i+2} {2*i+3} {tokens[i+1]} {tokens[i+1]} 0.0\n'
-      rules += f'{2*i+3} {2*i+3} {tokens[i+1]} 0 0.0\n'
-    rules += f'{2*num_tokens-1} {2*num_tokens} 0 0 0.0\n'
-    rules += f'{2*num_tokens-1} {2*num_tokens+1} -1 -1 0.0\n'
-    rules += f'{2*num_tokens} {2*num_tokens} 0 0 0.0\n'
-    rules += f'{2*num_tokens} {2*num_tokens+1} -1 -1 0.0\n'
-    rules += f'{final_state}'
-
-    ans = k2.Fsa.from_str(rules)
-    return ans
-    
+    mask = torch.ne(tot_scores, -math.inf)
+    # finite_indexes is a tensor containing successful segment indexes, e.g.
+    # [ 0 1 3 4 5 ]
+    finite_indexes = torch.nonzero(mask).squeeze(1)
+    if False:
+        bad_indexes = torch.nonzero(~mask).squeeze(1)
+        if bad_indexes.shape[0] > 0:
+            print("Bad indexes: ", bad_indexes, ", bad lengths: ",
+                  frames_per_seq[bad_indexes], " vs. max length ",
+                  torch.max(frames_per_seq), ", avg ",
+                  (torch.sum(frames_per_seq) / frames_per_seq.numel()))
+    # print("finite_indexes = ", finite_indexes, ", tot_scores = ", tot_scores)
+    ok_frames = frames_per_seq[finite_indexes].sum()
+    all_frames = frames_per_seq.sum()
+    return (tot_scores[finite_indexes].sum(), ok_frames, all_frames)
