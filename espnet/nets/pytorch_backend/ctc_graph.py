@@ -59,7 +59,8 @@ class K2CTCLoss(torch.nn.Module):
     supervision_segments = supervision_segments[indices]
 
     dense_fsa_vec = k2.DenseFsaVec(log_probs, supervision_segments)
-    decoding_graph = self.graph_compiler.compile(targets, target_lengths, indices).to(log_probs.device)
+    decoding_graph = self.graph_compiler.compile(targets, target_lengths)
+    decoding_graph = k2.index(decoding_graph, indices.to(torch.int32)).to(log_probs.device)
 
     target_graph = k2.intersect_dense(decoding_graph, dense_fsa_vec, 10.0)
     tot_scores = k2.get_tot_scores(target_graph,
@@ -118,17 +119,12 @@ class NaiveCtcTrainingGraphCompiler(object):
         self.ctc_topo = k2.arc_sort(ctc_topo)
         '''
 
-    def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor, indices: torch.Tensor = None) -> k2.Fsa:
+    def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor) -> k2.Fsa:
         texts_lengths = torch.cat([torch.tensor([0]), texts_lengths])
         texts_end_index = torch.cumsum(texts_lengths, 0)
 
-        if indices is not None:
-            iters = torch.tensor(list(range(texts_lengths.shape[0] - 1)))[indices]
-        else:
-            iters = torch.tensor(list(range(texts_lengths.shape[0] - 1)))
-
         decoding_graphs = k2.create_fsa_vec(
-            [self.compile_one_and_cache(texts[texts_end_index[i]: texts_end_index[i + 1]]) for i in iters.tolist()])
+            [self.compile_one_and_cache(texts[texts_end_index[i]: texts_end_index[i + 1]]) for i in range(texts_lengths.shape[0] - 1)])
 
         # make sure the gradient is not accumulated
         decoding_graphs.requires_grad_(False)
