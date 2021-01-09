@@ -49,15 +49,18 @@ class K2CTCLoss(torch.nn.Module):
     self.graph_compiler = NaiveCtcTrainingGraphCompiler(odim)
 
   def forward(self, log_probs: torch.Tensor, targets: torch.Tensor, input_lengths: torch.Tensor, target_lengths: torch.Tensor) -> torch.Tensor:
+    
     log_probs = log_probs.permute(1,0,2) # now log_probs is [N, T, C]  batchSize x seqLength x alphabet_size
-    decoding_graph = self.graph_compiler.compile(targets, target_lengths).to(log_probs.device)
     supervision_segments = torch.stack(
         (torch.tensor(range(input_lengths.shape[0])),
          torch.zeros(input_lengths.shape[0]),
          input_lengths), 1).to(torch.int32)
     indices = torch.argsort(supervision_segments[:, 2], descending=True)
     supervision_segments = supervision_segments[indices]
+
     dense_fsa_vec = k2.DenseFsaVec(log_probs, supervision_segments)
+    decoding_graph = self.graph_compiler.compile(targets, target_lengths, indices).to(log_probs.device)
+
     target_graph = k2.intersect_dense(decoding_graph, dense_fsa_vec, 10.0)
     tot_scores = k2.get_tot_scores(target_graph,
                                    log_semiring=True,
@@ -115,11 +118,17 @@ class NaiveCtcTrainingGraphCompiler(object):
         self.ctc_topo = k2.arc_sort(ctc_topo)
         '''
 
-    def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor) -> k2.Fsa:
+    def compile(self, texts: torch.Tensor, texts_lengths: torch.Tensor, indices: torch.Tensor = None) -> k2.Fsa:
         texts_lengths = torch.cat([torch.tensor([0]), texts_lengths])
         texts_end_index = torch.cumsum(texts_lengths, 0)
+
+        if indices is not None:
+            iters = torch.tensor(list(range(texts_lengths.shape[0] - 1)))[indices]
+        else:
+            iters = torch.tensor(list(range(texts_lengths.shape[0] - 1)))
+
         decoding_graphs = k2.create_fsa_vec(
-            [self.compile_one_and_cache(texts[texts_end_index[i]: texts_end_index[i + 1]]) for i in range(texts_lengths.shape[0] - 1)])
+            [self.compile_one_and_cache(texts[texts_end_index[i]: texts_end_index[i + 1]]) for i in iters.tolist()])
 
         # make sure the gradient is not accumulated
         decoding_graphs.requires_grad_(False)
@@ -131,64 +140,13 @@ class NaiveCtcTrainingGraphCompiler(object):
         '''
         fsa = k2.linear_fsa(word_ids)
         fsa.aux_labels = torch.tensor(word_ids + [-1], dtype=torch.int32)
-        decoding_graph = fsa
-        decoding_graph = k2.arc_sort(decoding_graph)
-        decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
+        fsa = k2.arc_sort(fsa)
+        decoding_graph = k2.compose(self.ctc_topo, fsa)
         decoding_graph = k2.connect(decoding_graph)
         '''
         # Fsa composition spends too much time when odim is large. 
         # Therefore, we used predefined function to get training graph
         decoding_graph = build_composed_ctc_topo(word_ids)
-        return decoding_graph
-
-class CtcTrainingGraphCompiler(object):
-
-    def __init__(self,
-                 L_inv: k2.Fsa,
-                 phones: k2.SymbolTable,
-                 words: k2.SymbolTable,
-                 oov: str = '<unk>'):
-        '''
-        Args:
-          L_inv:
-            Its labels are words, while its aux_labels are phones.
-        phones:
-          The phone symbol table.
-        words:
-          The word symbol table.
-        oov:
-          Out of vocabulary word.
-        '''
-        if L_inv.properties & k2.fsa_properties.ARC_SORTED != 0:
-            L_inv = k2.arc_sort(L_inv)
-
-        assert oov in words
-
-        self.L_inv = L_inv
-        self.phones = phones
-        self.words = words
-        self.oov = oov
-        ctc_topo = build_ctc_topo(list(phones._id2sym.keys()))
-        self.ctc_topo = k2.arc_sort(ctc_topo)
-
-    def compile(self, texts: Iterable[str]) -> k2.Fsa:
-        decoding_graphs = k2.create_fsa_vec(
-            [self.compile_one_and_cache(text) for text in texts])
-
-        # make sure the gradient is not accumulated
-        decoding_graphs.requires_grad_(False)
-        return decoding_graphs
-
-    @lru_cache(maxsize=100000)
-    def compile_one_and_cache(self, text: str) -> k2.Fsa:
-        tokens = (token if token in self.words else self.oov
-                  for token in text.split(' '))
-        word_ids = [self.words[token] for token in tokens]
-        fsa = k2.linear_fsa(word_ids)
-        decoding_graph = k2.connect(k2.intersect(fsa, self.L_inv)).invert_()
-        decoding_graph = k2.arc_sort(decoding_graph)
-        decoding_graph = k2.compose(self.ctc_topo, decoding_graph)
-        decoding_graph = k2.connect(decoding_graph)
         return decoding_graph
 
 def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
@@ -203,6 +161,7 @@ def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
 
     num_tokens = len(tokens) 
     final_state = num_tokens * 2 + 1
+
     rules = ''
     rules += f'0 0 0 0 0.0\n'
     rules += f'0 1 {tokens[0]} {tokens[0]} 0.0\n'
@@ -218,6 +177,7 @@ def build_composed_ctc_topo(tokens: List[int]) -> k2.Fsa:
     rules += f'{2*num_tokens} {2*num_tokens} 0 0 0.0\n'
     rules += f'{2*num_tokens} {2*num_tokens+1} -1 -1 0.0\n'
     rules += f'{final_state}'
+
     ans = k2.Fsa.from_str(rules)
     return ans
     
