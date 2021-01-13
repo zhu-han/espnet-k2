@@ -1,4 +1,4 @@
-# Copyright (c)  2020  Xiaomi Corp.       (author: Fangjun Kuang)
+# Modified from https://github.com/k2-fsa/snowfall/
 
 from functools import lru_cache
 from typing import (
@@ -109,6 +109,7 @@ class NaiveCtcTrainingGraphCompiler(object):
         linear_fsa = k2.linear_fsa(word_ids)
         decoding_graph = k2.intersect(self.ctc_topo, linear_fsa)
         decoding_graph = k2.connect(decoding_graph).invert_()
+        decoding_graph = k2.arc_sort(decoding_graph)
         return decoding_graph
 
 def get_tot_objf_and_num_frames(tot_scores: torch.Tensor,
