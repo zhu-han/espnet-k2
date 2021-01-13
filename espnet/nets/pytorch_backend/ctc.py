@@ -46,14 +46,14 @@ class CTC(torch.nn.Module):
             self.ctc_loss = K2CTCLoss(odim, reduction=reduction_type)
         else:
             raise ValueError(
-                'ctc_type must be "builtin" or "warpctc": {}'.format(self.ctc_type)
+                'ctc_type must be "builtin" or "warpctc" or "k2": {}'.format(self.ctc_type)
             )
 
         self.ignore_id = -1
         self.reduce = reduce
 
     def loss_fn(self, th_pred, th_target, th_ilen, th_olen):
-        if self.ctc_type == "builtin":
+        if self.ctc_type == "builtin" or self.ctc_type == "k2":
             th_pred = th_pred.log_softmax(2)
             # Use the deterministic CuDNN implementation of CTC loss to avoid
             #  [issue#17798](https://github.com/pytorch/pytorch/issues/17798)
@@ -64,12 +64,6 @@ class CTC(torch.nn.Module):
             return loss
         elif self.ctc_type == "warpctc":
             return self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
-        elif self.ctc_type == "k2":
-            th_pred = th_pred.log_softmax(2)
-            loss = self.ctc_loss(th_pred, th_target, th_ilen, th_olen)
-            # Batch-size average
-            loss = loss / th_pred.size(1)
-            return loss
         else:
             raise NotImplementedError
 
