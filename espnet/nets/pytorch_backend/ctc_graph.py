@@ -13,6 +13,13 @@ from typing import Tuple
 
 class K2CTCLoss(torch.nn.Module):
   def __init__(self, odim: int, reduction: str = 'sum') -> None:
+    '''The Connectionist Temporal Classification loss implemented with k2
+        Args:
+        odim:
+          Output dimension of CTC linear layer, len(symbol_list) + 2 (<blank> and <eos>).
+        reduction:
+          Specifies the reduction to apply to the output. Only support 'sum' now.
+    '''
     torch.nn.Module.__init__(self)
     self.graph_compiler = NaiveCtcTrainingGraphCompiler(odim)
 
